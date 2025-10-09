@@ -5,7 +5,6 @@
 
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
-// Function to rotate image manually
 void rotate_image(MagickWand *wand, double angle) {
     PixelWand *bg = NewPixelWand();
     PixelSetColor(bg, "white"); // Fill background with white after rotation
@@ -13,7 +12,6 @@ void rotate_image(MagickWand *wand, double angle) {
     bg = DestroyPixelWand(bg);
 }
 
-// Function to automatically detect skew angle (simple estimation using Hough transform approximation)
 double detect_skew_angle(MagickWand *wand) {
     // MagickWand does not provide direct skew detection,
     // so a simple approach is to compute orientation via deskew
