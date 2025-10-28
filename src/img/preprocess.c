@@ -1,79 +1,163 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <MagickWand/MagickWand.h>
 #include <math.h>
+#include <err.h>
 
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
+SDL_Surface* grayscale(SDL_Surface* surface);
+SDL_Surface* linear_contrast(SDL_Surface* surface);
 
-// Function to rotate image manually
-void rotate_image(MagickWand *wand, double angle) {
-    PixelWand *bg = NewPixelWand();
-    PixelSetColor(bg, "white"); // Fill background with white after rotation
-    MagickRotateImage(wand, bg, angle);
-    bg = DestroyPixelWand(bg);
-}
-
-// Function to automatically detect skew angle (simple estimation using Hough transform approximation)
-double detect_skew_angle(MagickWand *wand) {
-    // MagickWand does not provide direct skew detection,
-    // so a simple approach is to compute orientation via deskew
-    // using MagickDeskewImage, which tries to find the skew automatically
-    MagickBooleanType success = MagickDeskewImage(wand, 0.40 * QuantumRange); // threshold 40%
-    if (success == MagickFalse) {
-        return 0.0;
-    }
-    // Deskew already applied; return 0 as angle (MagickDeskewImage rotates internally)
-    return 0.0;
-}
-
-int main(int argc, char **argv) 
+int main(int argc, char* argv[]) 
 {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <input_image> [manual_angle]\n", argv[0]);
+    
+    if (argc < 2) 
+    {
+        printf("Usage: %s <image>\n", argv[0]);
         return 1;
     }
 
-    const char *input_path = argv[1];
-    double manual_angle = 0.0;
-    if (argc >= 3) {
-        manual_angle = atof(argv[2]); // Optional: user can provide manual rotation angle
-    }
-
-    MagickWandGenesis();
-    MagickWand *wand = NewMagickWand();
-
-    if (MagickReadImage(wand, input_path) == MagickFalse) {
-        fprintf(stderr, "Error reading image '%s'\n", input_path);
-        DestroyMagickWand(wand);
-        MagickWandTerminus();
+    
+    //initialise surfaces & video 
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) 
+    {
+        printf("Erreur SDL_Init : %s\n", SDL_GetError());
         return 1;
     }
 
-    // Manual deskew if user provided an angle
-    if (fabs(manual_angle) > 0.01) {
-        rotate_image(wand, manual_angle);
+    
+    //extention sdl_img to charge png format (default: bmp)
+    if (!(IMG_Init(IMG_INIT_PNG))) 
+    {
+        printf("Error IMG_Init : %s\n", IMG_GetError());
+        SDL_Quit();
+        return 1;
     }
 
-    // Automatic deskew
-    detect_skew_angle(wand);
+    SDL_Surface* image = IMG_Load(argv[1]);
 
-    // Noise reduction
-    MagickDespeckleImage(wand);
+    if (!image) 
+    {
+        printf("Error loading img %s\n", IMG_GetError());
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
 
-    // Contrast enhancement
-    MagickContrastStretchImage(wand, 0.1); // stretch contrast by 10% shadows/highlights
+    printf("Image chargée : %dx%d\n", image->w, image->h);
 
-    // Convert to grayscale
-    MagickSetImageType(wand, GrayscaleType);
+    
+    //grayscale
+    SDL_Surface* gray = grayscale(image);
 
-    // Convert to black & white (thresholding)
-    MagickThresholdImage(wand, QuantumRange/2);
+    if (!gray) 
+    {
+        SDL_FreeSurface(image);
+        IMG_Quit();
+        SDL_Quit();
+        errx(EXIT_FAILURE,"Error convertion grayscale\n");
+    }
 
-    // Save output
-    if (MagickWriteImage(wand, "output_bw.png") == MagickFalse) {
-        char *description = MagickGetException(wand, NULL);
-        fprintf(stderr, "Error: %s\n", description);
-        MagickRelinquishMemory(description);
-    } else {
-        printf("Image 'output_bw.png' created successfully!\n");
+
+    SDL_SaveBMP(gray, "gray.bmp");
+
+    //contrast
+    SDL_Surface* contrast = linear_contrast(gray);
+
+    if (!contrast) 
+    {
+        SDL_FreeSurface(image);
+        SDL_FreeSurface(gray);
+        IMG_Quit();
+        SDL_Quit();
+        errx(EXIT_FAILURE, "Error contrast\n");
+    }
+
+    SDL_SaveBMP(contrast, "contrast.bmp");
+
+    printf("'gray.bmp' & 'contrast.bmp' generated\n");
+
+    SDL_FreeSurface(image);
+    SDL_FreeSurface(gray);
+    SDL_FreeSurface(contrast);
+    IMG_Quit();
+    SDL_Quit();
+    return EXIT_SUCCESS;
+}
+
+
+
+
+SDL_Surface* grayscale(SDL_Surface* surface) 
+{
+    
+    SDL_Surface* gray = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB888, 0);
+    if (!gray) 
+	    return NULL;
+
+    if (SDL_MUSTLOCK(gray)) 
+	    SDL_LockSurface(gray);
+
+    Uint32* pixels = (Uint32*)gray->pixels;
+    int w = gray->w;
+    int h = gray->h;
+    SDL_PixelFormat* fmt = gray->format;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            Uint32 pixel = pixels[y * w + x];
+            Uint8 r, g, b;
+            SDL_GetRGB(pixel, fmt, &r, &g, &b);
+            Uint8 grayValue = (Uint8)(0.299*r + 0.587*g + 0.114*b);
+            pixels[y * w + x] = SDL_MapRGB(fmt, grayValue, grayValue, grayValue);
+        }
+    }
+
+    if (SDL_MUSTLOCK(gray)) SDL_UnlockSurface(gray);
+    return gray;
+}
+
+
+
+
+
+SDL_Surface* linear_contrast(SDL_Surface* surface) 
+{
+    SDL_Surface* result = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB888, 0);
+    if (!result) return NULL;
+
+    if (SDL_MUSTLOCK(result)) SDL_LockSurface(result);
+
+    Uint32* pixels = (Uint32*)result->pixels;
+    int w = result->w;
+    int h = result->h;
+    SDL_PixelFormat* fmt = result->format;
+
+    Uint8 Imin = 255, Imax = 0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[y * w + x], fmt, &r, &g, &b);
+            if (r < Imin) Imin = r;
+            if (r > Imax) Imax = r;
+        }
+    }
+
+    if (Imax == Imin) {
+        if (SDL_MUSTLOCK(result)) SDL_UnlockSurface(result);
+        return result;
+    }
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[y * w + x], fmt, &r, &g, &b);
+            Uint8 newV = (Uint8)(((float)(r - Imin) / (Imax - Imin)) * 255.0f);
+            pixels[y * w + x] = SDL_MapRGB(fmt, newV, newV, newV);
+        }
+    }
+
+    if (SDL_MUSTLOCK(result)) SDL_UnlockSurface(result);
+    return result;
+}
 
