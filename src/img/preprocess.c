@@ -113,7 +113,8 @@ SDL_Surface* grayscale(SDL_Surface* surface)
         }
     }
 
-    if (SDL_MUSTLOCK(gray)) SDL_UnlockSurface(gray);
+    if (SDL_MUSTLOCK(gray)) 
+	    SDL_UnlockSurface(gray);
     return gray;
 }
 
@@ -124,9 +125,11 @@ SDL_Surface* grayscale(SDL_Surface* surface)
 SDL_Surface* linear_contrast(SDL_Surface* surface) 
 {
     SDL_Surface* result = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB888, 0);
-    if (!result) return NULL;
+    if (!result) 
+	    return NULL;
 
-    if (SDL_MUSTLOCK(result)) SDL_LockSurface(result);
+    if (SDL_MUSTLOCK(result)) 
+	    SDL_LockSurface(result);
 
     Uint32* pixels = (Uint32*)result->pixels;
     int w = result->w;
@@ -157,7 +160,8 @@ SDL_Surface* linear_contrast(SDL_Surface* surface)
         }
     }
 
-    if (SDL_MUSTLOCK(result)) SDL_UnlockSurface(result);
+    if (SDL_MUSTLOCK(result)) 
+	    SDL_UnlockSurface(result);
     return result;
 }
 
