@@ -4,22 +4,22 @@
 #include "search.h"
 
 int main() {
-    // Grille corrigée où TOUS les mots existent réellement
+    
     char *data[] = {
-        "TXXXXXXCHAT",  // CHAT → O
-        "IRXXXEXXXXX",  // TIGRE ↓
+	"TXXXXCHATXX",
+        "IRXXXEXXXXX",  
         "GXAXXXXXXXX",
-        "RXBXOURSXXX",  // OURS → E
+        "RXBXOURSXXX", 
         "EXRXXEXXXXE",
         "XXXALEIULPC",
         "XXXOMXENITT",
-        "XXCXXIOLENO",  // ECOLE → O
-        "XEXXXELUIOP",  // PLUIE ↖
-        "XXXXXXSUNMM"   // MONT ↑
+        "XXCXXIOLENO",
+        "XEXXXELUIOP",
+        "XXXXXXSUNMM"
     };
 
     int rows = 10;
-    int cols = 11;  // ⚠️ 11 colonnes car "TXXXXXXCHAT" = 11 caractères
+    int cols = 11;  
 
     Grid *g = create_grid(data, rows, cols);
 
