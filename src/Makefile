@@ -1,40 +1,54 @@
-# Compiler and flags
+# Compiler
 CC = gcc
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -Wextra
 
-# Executables
-EXECS = img_exec ocr_exec segment_exec solver_exec ui_exec
+# SDL2 flags (only for preprocess)
+SDL_CFLAGS = $(shell sdl2-config --cflags)
+SDL_LDFLAGS = $(shell sdl2-config --libs) -lSDL2_image -lm
+
+# Executable names
+PREPROCESS_NAME = preprocess
+NN_NAME = neural_net
 
 # Source files
-IMG_SRC = img/img_io.c img/preprocess.c
-OCR_SRC = ocr/neural_net.c
-SEGMENT_SRC = segment/cell_finder.c segment/detect_layout.c segment/wordlist_finder.c
-SOLVER_SRC = solver/grid.c solver/search.c
-UI_SRC = ui/gui.c ui/render.c
+PREPROCESS_SRC = img/preprocess.c
+NN_SRC = ocr/neural_net.c
 
-# Default target: build all executables
-all: $(EXECS)
+# Object files
+PREPROCESS_OBJ = $(PREPROCESS_SRC:.c=.o)
+NN_OBJ = $(NN_SRC:.c=.o)
 
-# Build img executable
-img_exec: $(IMG_SRC)
-	$(CC) $(CFLAGS) -o img_exec $(IMG_SRC)
+# Default target: build both
+all: $(PREPROCESS_NAME) $(NN_NAME)
 
-# Build ocr executable
-ocr_exec: $(OCR_SRC)
-	$(CC) $(CFLAGS) -o ocr_exec $(OCR_SRC)
+# preprocess target (SDL2)
+$(PREPROCESS_NAME): $(PREPROCESS_OBJ)
+	$(CC) $(PREPROCESS_OBJ) -o $@ $(SDL_CFLAGS) $(SDL_LDFLAGS)
 
-# Build segment executable
-segment_exec: $(SEGMENT_SRC)
-	$(CC) $(CFLAGS) -o segment_exec $(SEGMENT_SRC)
+# neural_net target
+$(NN_NAME): $(NN_OBJ)
+	$(CC) $(NN_OBJ) -o $@ $(CFLAGS) -lm
 
-# Build solver executable
-solver_exec: $(SOLVER_SRC)
-	$(CC) $(CFLAGS) -o solver_exec $(SOLVER_SRC)
+# Generic compilation rule
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-# Build ui executable
-ui_exec: $(UI_SRC)
-	$(CC) $(CFLAGS) -o ui_exec $(UI_SRC)
-
-# Clean all executables
+# Clean object files
 clean:
-	rm -f $(EXECS)
+	rm -f $(PREPROCESS_OBJ) $(NN_OBJ)
+
+# Clean all executables and objects
+fclean: clean
+	rm -f $(PREPROCESS_NAME) $(NN_NAME)
+
+# Rebuild everything
+re: fclean all
+
+# Run targets
+run-preprocess: $(PREPROCESS_NAME)
+	./$(PREPROCESS_NAME)
+
+run-nn: $(NN_NAME)
+	./$(NN_NAME)
+
+.PHONY: all clean fclean re run-preprocess run-nn
