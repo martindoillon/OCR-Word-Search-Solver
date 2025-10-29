@@ -1,30 +1,54 @@
-// Exemple d'utilisation
-int main(void) {
-    // Définition de la grille
-    char *my_grid[] = {
-        "ABCD",
-        "EFGH",
-        "IJKL",
-        "MNOP"
-    };
-    int rows = 4, cols = 4;
-    char **grid = grid_from_array(my_grid, rows, cols);
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include "grid.h"
 
-    // Définition de la liste de mots
-    char *words_list[] = { "ABCD", "GHI", "MNO", "JKL", "XYZ" };
-    int word_count = sizeof(words_list)/sizeof(words_list[0]);
-    char **words = words_from_list(words_list, word_count);
+typedef struct {
+    char direction[3];
+    int dx, dy;
+} Direction;
 
-    // Recherche
-    find_words(grid, rows, cols, words, word_count);
+Direction dirs[] = {
+    {"N", -1, 0},
+    {"S", 1, 0},
+    {"E", 0, 1},
+    {"O", 0, -1},
+    {"NE", -1, 1},
+    {"NO", -1, -1},
+    {"SE", 1, 1},
+    {"SO", 1, -1}
+};
 
-    // Libération mémoire
-    free_grid(grid, rows);
-    free_words(words, word_count);
-
-    return 0;
+int in_bounds(Grid *g, int x, int y) {
+    return x >= 0 && x < g->rows && y >= 0 && y < g->cols;
 }
 
+int search_from(Grid *g, const char *word, int x, int y, Direction dir) {
+    int len = strlen(word);
+    for (int i = 0; i < len; i++) {
+        int nx = x + dir.dx * i;
+        int ny = y + dir.dy * i;
+        if (!in_bounds(g, nx, ny) || g->data[nx][ny] != toupper(word[i]))
+            return 0;
+    }
+    return 1;
+}
 
+void find_word(Grid *g, const char *word) {
+    for (int i = 0; i < g->rows; i++) {
+        for (int j = 0; j < g->cols; j++) {
+            for (int d = 0; d < 8; d++) {
+                if (search_from(g, word, i, j, dirs[d])) {
+                    printf("%s trouvé en (%d, %d) direction %s\n", word, i, j, dirs[d].direction);
+                }
+            }
+        }
+    }
+}
 
-"solver.c" 140L, 4226B                                                                                136,1         Bot
+void find_words(Grid *g, char **words, int n) {
+    for (int i = 0; i < n; i++) {
+        find_word(g, words[i]);
+    }
+}
+
