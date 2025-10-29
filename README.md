@@ -13,9 +13,6 @@ Debian/Ubuntu:
 sudo apt update
 sudo apt install build-essential libsdl2-dev libsdl2-image-dev
 
-Fedora/RHEL:
-sudo dnf install gcc gcc-c++ SDL2-devel SDL2_image-devel
-
 Building the project:
 
 1. Navigate to the src directory:
@@ -25,7 +22,9 @@ cd src
 make
 
 3. Optionally, run the programs:
+   
 ./preprocess       # Image loading, grayscale, contrast, and manual rotation
+
 ./neural_net       # Neural network proof-of-concept
 
 Cleaning build files:
