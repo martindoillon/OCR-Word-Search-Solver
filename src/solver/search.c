@@ -1,54 +1,172 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include "grid.h"
 
 typedef struct {
-    char direction[3];
-    int dx, dy;
-} Direction;
+    int x, y;
+} Point;
 
-Direction dirs[] = {
-    {"N", -1, 0},
-    {"S", 1, 0},
-    {"E", 0, 1},
-    {"O", 0, -1},
-    {"NE", -1, 1},
-    {"NO", -1, -1},
-    {"SE", 1, 1},
-    {"SO", 1, -1}
-};
+static int read_grid(const char *path, char ***out_grid, int *rows, int *cols) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
 
-int in_bounds(Grid *g, int x, int y) {
-    return x >= 0 && x < g->rows && y >= 0 && y < g->cols;
-}
+    size_t cap = 16, n = 0;
+    char **grid = malloc(cap * sizeof(*grid));
+    if (!grid) { fclose(f); return -2; }
 
-int search_from(Grid *g, const char *word, int x, int y, Direction dir) {
-    int len = strlen(word);
-    for (int i = 0; i < len; i++) {
-        int nx = x + dir.dx * i;
-        int ny = y + dir.dy * i;
-        if (!in_bounds(g, nx, ny) || g->data[nx][ny] != toupper(word[i]))
-            return 0;
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t got;
+    int width = -1;
+
+    while ((got = getline(&line, &len, f)) != -1) {
+        
+        while (got > 0 && (line[got-1] == '\n' || line[got-1] == '\r')) {
+            line[--got] = '\0';
+        }
+        if (got == 0) continue;
+        
+        for (int i = 0; i < got; i++) {
+            if (line[i] == ' ') {
+                free(line);
+                for (size_t k = 0; k < n; k++) free(grid[k]);
+                free(grid);
+                fclose(f);
+                return -3;
+            }
+            if (!isupper((unsigned char)line[i])) {
+                if (isalpha((unsigned char)line[i])) {
+                    line[i] = (char)toupper((unsigned char)line[i]);
+                } else { 
+                    free(line);
+                    for (size_t k = 0; k < n; k++) free(grid[k]);
+                    free(grid);
+                    fclose(f);
+                    return -3;
+                }
+            }
+        }
+
+        if (width == -1) width = (int)got;
+        if (got != width) {
+            free(line);
+            for (size_t k = 0; k < n; k++) free(grid[k]);
+            free(grid);
+            fclose(f);
+            return -4;
+        }
+
+        if (n == cap) {
+            cap *= 2;
+            char **tmp = realloc(grid, cap * sizeof(*grid));
+            if (!tmp) {
+                free(line);
+                for (size_t k = 0; k < n; k++) free(grid[k]);
+                free(grid);
+                fclose(f);
+                return -2;
+            }
+            grid = tmp;
+        }
+        char *row = malloc((size_t)width + 1);
+        if (!row) {
+            free(line);
+            for (size_t k = 0; k < n; k++) free(grid[k]);
+            free(grid);
+            fclose(f);
+            return -2;
+        }
+        memcpy(row, line, (size_t)width + 1);
+        grid[n++] = row;
     }
-    return 1;
+
+    free(line);
+    fclose(f);
+
+    if (n == 0 || width <= 0) {
+        for (size_t k = 0; k < n; k++) free(grid[k]);
+        free(grid);
+        return -5;
+    }
+
+    *out_grid = grid;
+    *rows = (int)n;
+    *cols = width;
+    return 0;
 }
 
-void find_word(Grid *g, const char *word) {
-    for (int i = 0; i < g->rows; i++) {
-        for (int j = 0; j < g->cols; j++) {
+static void uppercase(char *s) {
+    for (; *s; ++s) *s = (char)toupper((unsigned char)*s);
+}
+
+static int in_bounds(int x, int y, int cols, int rows) {
+    return (x >= 0 && x < cols && y >= 0 && y < rows);
+}
+
+static int search_word(char **grid, int rows, int cols, const char *word, Point *p0, Point *p1) {
+    int L = (int)strlen(word);
+    if (L == 0) return 0;
+ 
+    const int dirs[8][2] = {
+        { 1,  0}, {-1,  0}, { 0,  1}, { 0, -1},
+        { 1,  1}, {-1, -1}, { 1, -1}, {-1,  1}
+    };
+
+    for (int y = 0; y < rows; y++) {
+        for (int x = 0; x < cols; x++) {
+            if (grid[y][x] != word[0]) continue;
             for (int d = 0; d < 8; d++) {
-                if (search_from(g, word, i, j, dirs[d])) {
-                    printf("%s trouvé en (%d, %d) direction %s\n", word, i, j, dirs[d].direction);
+                int dx = dirs[d][0], dy = dirs[d][1];
+                int xx = x, yy = y;
+                int k;
+                for (k = 1; k < L; k++) {
+                    xx += dx; yy += dy;
+                    if (!in_bounds(xx, yy, cols, rows)) break;
+                    if (grid[yy][xx] != word[k]) break;
+                }
+                if (k == L) {
+                    p0->x = x;  p0->y = y;
+                    p1->x = xx; p1->y = yy;
+                    return 1;
                 }
             }
         }
     }
+    return 0;
 }
 
-void find_words(Grid *g, char **words, int n) {
-    for (int i = 0; i < n; i++) {
-        find_word(g, words[i]);
+int main(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <grid_file> <word>\n", argv[0]);
+        return 1;
     }
+
+    const char *grid_path = argv[1];
+    char *word = argv[2];
+
+
+    uppercase(word);
+
+    char **grid = NULL;
+    int rows = 0, cols = 0;
+    int rc = read_grid(grid_path, &grid, &rows, &cols);
+    if (rc != 0) {
+
+
+
+        return 1;
+    }
+
+    Point a = {0,0}, b = {0,0};
+    if (search_word(grid, rows, cols, word, &a, &b)) {
+        printf("(%d,%d)(%d,%d)\n", a.x, a.y, b.x, b.y);
+    } else {
+        printf("Not found\n");
+    }
+
+    for (int i = 0; i < rows; i++) free(grid[i]);
+    free(grid);
+    return 0;
 }
 
