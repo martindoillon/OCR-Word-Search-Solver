@@ -1,5 +1,5 @@
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra
+CFLAGS  ?= -Wall -Wextra
 LDFLAGS ?= -lSDL2 -lSDL2_image -lm
 
 ALL = detect_layout cell_finder wordlist_finder

@@ -1,30 +1,45 @@
+// detect_layout.c
+// Detect grid and word-list ROIs, write grid_roi.txt and wordlist_roi.txt
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
-// Function to compute Otsu's threshold on a grayscale histogram
-static Uint8 compute_otsu_threshold(unsigned int hist[256], unsigned int total_pixels) {
+static int make_dir_if_needed(const char *path)
+{
+    int r = mkdir(path, 0775);
+    if (r == 0 || errno == EEXIST) return 0;
+    perror("mkdir");
+    return -1;
+}
+
+static Uint8 compute_otsu_threshold(unsigned int hist[256], unsigned int total)
+{
     unsigned int sum = 0;
-    for (int t = 0; t < 256; ++t) {
-        sum += t * hist[t];
-    }
+    for (int t = 0; t < 256; ++t) sum += t * hist[t];
+
     unsigned int sumB = 0;
     unsigned int wB = 0;
-    unsigned int wF = 0;
     double varMax = 0.0;
     Uint8 threshold = 128;
-    for (int t = 0; t < 256; ++t) {
+
+    for (int t = 0; t < 256; ++t)
+    {
         wB += hist[t];
         if (wB == 0) continue;
-        wF = total_pixels - wB;
+        unsigned int wF = total - wB;
         if (wF == 0) break;
         sumB += t * hist[t];
         double mB = (double)sumB / wB;
         double mF = (double)(sum - sumB) / wF;
         double varBetween = (double)wB * wF * (mB - mF) * (mB - mF);
-        if (varBetween > varMax) {
+        if (varBetween > varMax)
+        {
             varMax = varBetween;
             threshold = (Uint8)t;
         }
@@ -32,137 +47,219 @@ static Uint8 compute_otsu_threshold(unsigned int hist[256], unsigned int total_p
     return threshold;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <input_image>\n", argc > 0 ? argv[0] : "program");
-        return 1;
-    }
-    const char *input_path = argv[1];
-    // Initialize SDL2
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "SDL_Init Error: %s\n", SDL_GetError());
-        return 1;
-    }
-    int imgFlags = IMG_INIT_PNG | IMG_INIT_JPG;
-    if ((IMG_Init(imgFlags) & imgFlags) == 0) {
-        fprintf(stderr, "SDL_image Init Error: %s\n", IMG_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-    // Load the input image
-    SDL_Surface *orig = IMG_Load(input_path);
-    if (!orig) {
-        fprintf(stderr, "Could not load image %s: %s\n", input_path, IMG_GetError());
-        IMG_Quit();
-        SDL_Quit();
-        return 1;
-    }
-    // Convert to 32-bit ARGB format for easy pixel access
-    SDL_Surface *surf = SDL_ConvertSurfaceFormat(orig, SDL_PIXELFORMAT_ARGB8888, 0);
-    SDL_FreeSurface(orig);
-    if (!surf) {
-        fprintf(stderr, "Convert surface error: %s\n", SDL_GetError());
-        IMG_Quit();
-        SDL_Quit();
-        return 1;
-    }
-
-    int width = surf->w;
-    int height = surf->h;
-    // Create a new surface for the binary (thresholded) image
-    SDL_Surface *binSurf = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_ARGB8888);
-    if (!binSurf) {
-        fprintf(stderr, "Create surface error: %s\n", SDL_GetError());
-        SDL_FreeSurface(surf);
-        IMG_Quit();
-        SDL_Quit();
-        return 1;
-    }
-
-    // Lock surfaces for direct pixel access
-    SDL_LockSurface(surf);
-    SDL_LockSurface(binSurf);
-    Uint8 *pixels = (Uint8 *)surf->pixels;
-    Uint8 *binPixels = (Uint8 *)binSurf->pixels;
-    int surfPitch = surf->pitch;
-    int binPitch = binSurf->pitch;
-
-    // Allocate arrays for projections and binary map
-    int *col_sum = (int *)calloc(width, sizeof(int));
-    int *row_sum = (int *)calloc(height, sizeof(int));
-    if (!col_sum || !row_sum) {
-        fprintf(stderr, "Memory allocation error\n");
-        free(col_sum);
-        free(row_sum);
-        SDL_UnlockSurface(surf);
-        SDL_UnlockSurface(binSurf);
-        SDL_FreeSurface(surf);
-        SDL_FreeSurface(binSurf);
-        IMG_Quit();
-        SDL_Quit();
-        return 1;
-    }
-
-    // Prepare histogram for Otsu threshold
+static SDL_Surface *make_binary(SDL_Surface *src, Uint8 *out_thresh)
+{
+    int w = src->w;
+    int h = src->h;
     unsigned int hist[256] = {0};
-    for (int y = 0; y < height; ++y) {
-        Uint8 *row = pixels + y * surfPitch;
-        for (int x = 0; x < width; ++x) {
+
+    SDL_LockSurface(src);
+    Uint8 *sp = (Uint8 *)src->pixels;
+    int spitch = src->pitch;
+
+    for (int y = 0; y < h; ++y)
+    {
+        Uint8 *row = sp + y * spitch;
+        for (int x = 0; x < w; ++x)
+        {
             Uint8 b = row[x * 4 + 0];
             Uint8 g = row[x * 4 + 1];
             Uint8 r = row[x * 4 + 2];
-            Uint32 gray = (Uint32)(r * 299 + g * 587 + b * 114) / 1000;
+            int gray = (r * 299 + g * 587 + b * 114) / 1000;
+            if (gray < 0) gray = 0;
             if (gray > 255) gray = 255;
-            hist[gray] += 1;
+            hist[gray]++;
         }
     }
-    unsigned int total_pixels = width * height;
-    Uint8 threshVal = compute_otsu_threshold(hist, total_pixels);
-    // Map colors for black and white in the binary surface format
-    Uint32 whitePixel = SDL_MapRGB(binSurf->format, 255, 255, 255);
-    Uint32 blackPixel = SDL_MapRGB(binSurf->format, 0, 0, 0);
+    SDL_UnlockSurface(src);
 
-    int min_x = width, min_y = height;
-    int max_x = -1, max_y = -1;
-    for (int y = 0; y < height; ++y) {
-        Uint8 *srcRow = pixels + y * surfPitch;
-        Uint8 *dstRow = binPixels + y * binPitch;
-        for (int x = 0; x < width; ++x) {
-            Uint8 b = srcRow[x * 4 + 0];
-            Uint8 g = srcRow[x * 4 + 1];
-            Uint8 r = srcRow[x * 4 + 2];
-            Uint32 gray = (Uint32)(r * 299 + g * 587 + b * 114) / 1000;
+    Uint8 thr = compute_otsu_threshold(hist, (unsigned int)w * (unsigned int)h);
+    if (out_thresh) *out_thresh = thr;
+
+    SDL_Surface *bin = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!bin) return NULL;
+
+    Uint32 white = SDL_MapRGB(bin->format, 255, 255, 255);
+    Uint32 black = SDL_MapRGB(bin->format, 0, 0, 0);
+
+    SDL_LockSurface(src);
+    SDL_LockSurface(bin);
+    sp = (Uint8 *)src->pixels;
+    spitch = src->pitch;
+    Uint8 *bp = (Uint8 *)bin->pixels;
+    int bpitch = bin->pitch;
+
+    for (int y = 0; y < h; ++y)
+    {
+        Uint8 *srow = sp + y * spitch;
+        Uint8 *brow = bp + y * bpitch;
+        for (int x = 0; x < w; ++x)
+        {
+            Uint8 b = srow[x * 4 + 0];
+            Uint8 g = srow[x * 4 + 1];
+            Uint8 r = srow[x * 4 + 2];
+            int gray = (r * 299 + g * 587 + b * 114) / 1000;
+            if (gray < 0) gray = 0;
             if (gray > 255) gray = 255;
-            if (gray < threshVal) {
-                *(Uint32 *)(dstRow + x * 4) = blackPixel;
-                col_sum[x] += 1;
-                row_sum[y] += 1;
+            *(Uint32 *)(brow + x * 4) = (gray < thr) ? black : white;
+        }
+    }
+
+    SDL_UnlockSurface(bin);
+    SDL_UnlockSurface(src);
+    return bin;
+}
+
+static void draw_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 color)
+{
+    if (!s || w <= 0 || h <= 0) return;
+    Uint8 *p = (Uint8 *)s->pixels;
+    int pitch = s->pitch;
+
+    if (y >= 0 && y < s->h)
+    {
+        Uint32 *row = (Uint32 *)(p + y * pitch);
+        for (int i = x; i < x + w && i < s->w; ++i) if (i >= 0) row[i] = color;
+    }
+    int by = y + h - 1;
+    if (by >= 0 && by < s->h)
+    {
+        Uint32 *row = (Uint32 *)(p + by * pitch);
+        for (int i = x; i < x + w && i < s->w; ++i) if (i >= 0) row[i] = color;
+    }
+    if (x >= 0 && x < s->w)
+    {
+        for (int j = y; j < y + h && j < s->h; ++j) if (j >= 0)
+        {
+            Uint32 *row = (Uint32 *)(p + j * pitch);
+            row[x] = color;
+        }
+    }
+    int rx = x + w - 1;
+    if (rx >= 0 && rx < s->w)
+    {
+        for (int j = y; j < y + h && j < s->h; ++j) if (j >= 0)
+        {
+            Uint32 *row = (Uint32 *)(p + j * pitch);
+            row[rx] = color;
+        }
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: %s <input_image>\n", argc > 0 ? argv[0] : "detect_layout");
+        return 1;
+    }
+
+    const char *input = argv[1];
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0)
+    {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    int flags = IMG_INIT_PNG | IMG_INIT_JPG;
+    if ((IMG_Init(flags) & flags) == 0)
+    {
+        fprintf(stderr, "IMG_Init: %s\n", IMG_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    SDL_Surface *orig0 = IMG_Load(input);
+    if (!orig0)
+    {
+        fprintf(stderr, "IMG_Load: %s\n", IMG_GetError());
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    SDL_Surface *orig = SDL_ConvertSurfaceFormat(orig0, SDL_PIXELFORMAT_ARGB8888, 0);
+    SDL_FreeSurface(orig0);
+    if (!orig)
+    {
+        fprintf(stderr, "ConvertSurface: %s\n", SDL_GetError());
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    Uint8 thr = 0;
+    SDL_Surface *bin = make_binary(orig, &thr);
+    if (!bin)
+    {
+        fprintf(stderr, "make_binary failed\n");
+        SDL_FreeSurface(orig);
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    int w = bin->w;
+    int h = bin->h;
+    Uint32 black = SDL_MapRGB(bin->format, 0, 0, 0);
+
+    int *col_sum = (int *)calloc(w, sizeof(int));
+    int *row_sum = (int *)calloc(h, sizeof(int));
+    if (!col_sum || !row_sum)
+    {
+        fprintf(stderr, "oom\n");
+        free(col_sum);
+        free(row_sum);
+        SDL_FreeSurface(bin);
+        SDL_FreeSurface(orig);
+        IMG_Quit();
+        SDL_Quit();
+        return 1;
+    }
+
+    SDL_LockSurface(bin);
+    Uint8 *bp = (Uint8 *)bin->pixels;
+    int pitch = bin->pitch;
+    int min_x = w, min_y = h, max_x = -1, max_y = -1;
+
+    for (int y = 0; y < h; ++y)
+    {
+        Uint32 *row = (Uint32 *)(bp + y * pitch);
+        for (int x = 0; x < w; ++x)
+        {
+            if (row[x] == black)
+            {
+                col_sum[x]++;
+                row_sum[y]++;
                 if (x < min_x) min_x = x;
                 if (x > max_x) max_x = x;
                 if (y < min_y) min_y = y;
                 if (y > max_y) max_y = y;
-            } else {
-                *(Uint32 *)(dstRow + x * 4) = whitePixel;
             }
         }
     }
-    SDL_UnlockSurface(surf);
-    SDL_UnlockSurface(binSurf);
+    SDL_UnlockSurface(bin);
 
-    if (max_x < 0 || max_y < 0) {
-        min_x = 0; min_y = 0;
-        max_x = 0; max_y = 0;
+    if (max_x < 0 || max_y < 0)
+    {
+        min_x = min_y = 0;
+        max_x = max_y = 0;
     }
 
     int best_run_col = 0, best_col_start = -1, best_col_end = -1;
     int curr_run = 0, curr_start = -1;
-    for (int cx = min_x; cx <= max_x; ++cx) {
-        if (col_sum[cx] == 0) {
+    for (int cx = min_x; cx <= max_x; ++cx)
+    {
+        if (col_sum[cx] == 0)
+        {
             if (curr_run == 0) curr_start = cx;
             curr_run++;
-        } else {
-            if (curr_run > best_run_col) {
+        }
+        else
+        {
+            if (curr_run > best_run_col)
+            {
                 best_run_col = curr_run;
                 best_col_start = curr_start;
                 best_col_end = cx - 1;
@@ -170,7 +267,8 @@ int main(int argc, char *argv[]) {
             curr_run = 0;
         }
     }
-    if (curr_run > best_run_col) {
+    if (curr_run > best_run_col)
+    {
         best_run_col = curr_run;
         best_col_start = curr_start;
         best_col_end = max_x;
@@ -178,12 +276,17 @@ int main(int argc, char *argv[]) {
 
     int best_run_row = 0, best_row_start = -1, best_row_end = -1;
     curr_run = 0; curr_start = -1;
-    for (int ry = min_y; ry <= max_y; ++ry) {
-        if (row_sum[ry] == 0) {
+    for (int ry = min_y; ry <= max_y; ++ry)
+    {
+        if (row_sum[ry] == 0)
+        {
             if (curr_run == 0) curr_start = ry;
             curr_run++;
-        } else {
-            if (curr_run > best_run_row) {
+        }
+        else
+        {
+            if (curr_run > best_run_row)
+            {
                 best_run_row = curr_run;
                 best_row_start = curr_start;
                 best_row_end = ry - 1;
@@ -191,58 +294,66 @@ int main(int argc, char *argv[]) {
             curr_run = 0;
         }
     }
-    if (curr_run > best_run_row) {
+    if (curr_run > best_run_row)
+    {
         best_run_row = curr_run;
         best_row_start = curr_start;
         best_row_end = max_y;
     }
 
-    int split_vertical = 0;
-    int split_horizontal = 0;
-    if (best_run_col >= 1) split_vertical = 1;
-    if (best_run_row >= 1) split_horizontal = 1;
-    if (split_vertical && split_horizontal) {
-        if (best_run_col >= best_run_row) {
-            split_horizontal = 0;
-        } else {
-            split_vertical = 0;
-        }
+    bool split_vertical = (best_run_col >= 1);
+    bool split_horizontal = (best_run_row >= 1);
+    if (split_vertical && split_horizontal)
+    {
+        if (best_run_col >= best_run_row) split_horizontal = false;
+        else split_vertical = false;
     }
 
-    int grid_x, grid_y, grid_w, grid_h;
-    int list_x, list_y, list_w, list_h;
-    if (!split_vertical && !split_horizontal) {
+    int grid_x = 0, grid_y = 0, grid_w = 0, grid_h = 0;
+    int list_x = 0, list_y = 0, list_w = 0, list_h = 0;
+    int grid_cols = 0, grid_rows = 0;
+    int word_count = 0;
+
+    if (!split_vertical && !split_horizontal)
+    {
         grid_x = min_x;
         grid_y = min_y;
         grid_w = max_x - min_x + 1;
         grid_h = max_y - min_y + 1;
         list_x = list_y = list_w = list_h = 0;
-    } else if (split_vertical) {
-        int gap_start = best_col_start;
-        int gap_end = best_col_end;
-        int c1_x1 = min_x;
-        int c1_x2 = gap_start - 1;
-        int c2_x1 = gap_end + 1;
-        int c2_x2 = max_x;
-        int c1_y1 = height, c1_y2 = -1;
-        int c2_y1 = height, c2_y2 = -1;
-        SDL_LockSurface(binSurf);
-        Uint8 *binPix = (Uint8 *)binSurf->pixels;
-        int binPitch2 = binSurf->pitch;
-        for (int y = min_y; y <= max_y; ++y) {
-            Uint32 *row = (Uint32 *)(binPix + y * binPitch2);
-            if (c1_x1 <= c1_x2) {
-                for (int x = c1_x1; x <= c1_x2; ++x) {
-                    if (row[x] == blackPixel) {
+    }
+    else if (split_vertical)
+    {
+        int gap_s = best_col_start;
+        int gap_e = best_col_end;
+        int c1_x1 = min_x, c1_x2 = gap_s - 1;
+        int c2_x1 = gap_e + 1, c2_x2 = max_x;
+        int c1_y1 = h, c1_y2 = -1, c2_y1 = h, c2_y2 = -1;
+
+        SDL_LockSurface(bin);
+        bp = (Uint8 *)bin->pixels;
+        pitch = bin->pitch;
+        for (int y = min_y; y <= max_y; ++y)
+        {
+            Uint32 *row = (Uint32 *)(bp + y * pitch);
+            if (c1_x1 <= c1_x2)
+            {
+                for (int x = c1_x1; x <= c1_x2; ++x)
+                {
+                    if (row[x] == black)
+                    {
                         if (y < c1_y1) c1_y1 = y;
                         if (y > c1_y2) c1_y2 = y;
                         break;
                     }
                 }
             }
-            if (c2_x1 <= c2_x2) {
-                for (int x = c2_x1; x <= c2_x2; ++x) {
-                    if (row[x] == blackPixel) {
+            if (c2_x1 <= c2_x2)
+            {
+                for (int x = c2_x1; x <= c2_x2; ++x)
+                {
+                    if (row[x] == black)
+                    {
                         if (y < c2_y1) c2_y1 = y;
                         if (y > c2_y2) c2_y2 = y;
                         break;
@@ -250,203 +361,320 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
-        SDL_UnlockSurface(binSurf);
+        SDL_UnlockSurface(bin);
+
         long c1_black = 0, c2_black = 0;
-        SDL_LockSurface(binSurf);
-        binPix = (Uint8 *)binSurf->pixels;
-        for (int y = c1_y1; y <= c1_y2; ++y) {
-            Uint32 *row = (Uint32 *)(binPix + y * binPitch2);
-            for (int x = c1_x1; x <= c1_x2; ++x) {
-                if (row[x] == blackPixel) c1_black++;
+        if (c1_y2 >= c1_y1 && c1_x2 >= c1_x1)
+        {
+            SDL_LockSurface(bin);
+            bp = (Uint8 *)bin->pixels;
+            pitch = bin->pitch;
+            for (int y = c1_y1; y <= c1_y2; ++y)
+            {
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = c1_x1; x <= c1_x2; ++x) if (row[x] == black) c1_black++;
             }
+            SDL_UnlockSurface(bin);
         }
-        for (int y = c2_y1; y <= c2_y2; ++y) {
-            Uint32 *row = (Uint32 *)(binPix + y * binPitch2);
-            for (int x = c2_x1; x <= c2_x2; ++x) {
-                if (row[x] == blackPixel) c2_black++;
+        if (c2_y2 >= c2_y1 && c2_x2 >= c2_x1)
+        {
+            SDL_LockSurface(bin);
+            bp = (Uint8 *)bin->pixels;
+            pitch = bin->pitch;
+            for (int y = c2_y1; y <= c2_y2; ++y)
+            {
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = c2_x1; x <= c2_x2; ++x) if (row[x] == black) c2_black++;
             }
+            SDL_UnlockSurface(bin);
         }
-        SDL_UnlockSurface(binSurf);
-        int gridCluster1 = (c1_black >= c2_black);
-        if (gridCluster1) {
-            grid_x = c1_x1;
-            grid_y = c1_y1;
-            grid_w = c1_x2 - c1_x1 + 1;
-            grid_h = c1_y2 - c1_y1 + 1;
-            list_x = c2_x1;
-            list_y = c2_y1;
-            list_w = c2_x2 - c2_x1 + 1;
-            list_h = c2_y2 - c2_y1 + 1;
-        } else {
-            grid_x = c2_x1;
-            grid_y = c2_y1;
-            grid_w = c2_x2 - c2_x1 + 1;
-            grid_h = c2_y2 - c2_y1 + 1;
-            list_x = c1_x1;
-            list_y = c1_y1;
-            list_w = c1_x2 - c1_x1 + 1;
-            list_h = c1_y2 - c1_y1 + 1;
+
+        bool c1grid = (c1_black >= c2_black);
+        if (c1grid)
+        {
+            grid_x = c1_x1; grid_y = c1_y1; grid_w = c1_x2 - c1_x1 + 1; grid_h = c1_y2 - c1_y1 + 1;
+            list_x = c2_x1; list_y = c2_y1; list_w = c2_x2 - c2_x1 + 1; list_h = c2_y2 - c2_y1 + 1;
         }
-    } else { // split_horizontal
-        int gap_start = best_row_start;
-        int gap_end = best_row_end;
-        int c1_y1 = min_y;
-        int c1_y2 = gap_start - 1;
-        int c2_y1 = gap_end + 1;
-        int c2_y2 = max_y;
-        int c1_x1 = width, c1_x2 = -1;
-        int c2_x1 = width, c2_x2 = -1;
-        SDL_LockSurface(binSurf);
-        Uint8 *binPix2 = (Uint8 *)binSurf->pixels;
-        int binPitch3 = binSurf->pitch;
-        for (int x = min_x; x <= max_x; ++x) {
-            for (int y = c1_y1; y <= c1_y2; ++y) {
-                Uint32 pixel = *(Uint32 *)(binPix2 + y * binPitch3 + x * 4);
-                if (pixel == blackPixel) {
+        else
+        {
+            grid_x = c2_x1; grid_y = c2_y1; grid_w = c2_x2 - c2_x1 + 1; grid_h = c2_y2 - c2_y1 + 1;
+            list_x = c1_x1; list_y = c1_y1; list_w = c1_x2 - c1_x1 + 1; list_h = c1_y2 - c1_y1 + 1;
+        }
+    }
+    else
+    {
+        int gap_s = best_row_start;
+        int gap_e = best_row_end;
+        int c1_y1 = min_y, c1_y2 = gap_s - 1;
+        int c2_y1 = gap_e + 1, c2_y2 = max_y;
+        int c1_x1 = w, c1_x2 = -1, c2_x1 = w, c2_x2 = -1;
+
+        SDL_LockSurface(bin);
+        bp = (Uint8 *)bin->pixels;
+        pitch = bin->pitch;
+        for (int x = min_x; x <= max_x; ++x)
+        {
+            for (int y = c1_y1; y <= c1_y2; ++y)
+            {
+                Uint32 px = *(Uint32 *)(bp + y * pitch + x * 4);
+                if (px == black)
+                {
                     if (x < c1_x1) c1_x1 = x;
                     if (x > c1_x2) c1_x2 = x;
                     break;
                 }
             }
-            for (int y = c2_y1; y <= c2_y2; ++y) {
-                Uint32 pixel = *(Uint32 *)(binPix2 + y * binPitch3 + x * 4);
-                if (pixel == blackPixel) {
+            for (int y = c2_y1; y <= c2_y2; ++y)
+            {
+                Uint32 px = *(Uint32 *)(bp + y * pitch + x * 4);
+                if (px == black)
+                {
                     if (x < c2_x1) c2_x1 = x;
                     if (x > c2_x2) c2_x2 = x;
                     break;
                 }
             }
         }
-        SDL_UnlockSurface(binSurf);
+        SDL_UnlockSurface(bin);
+
         long c1_black = 0, c2_black = 0;
-        SDL_LockSurface(binSurf);
-        binPix2 = (Uint8 *)binSurf->pixels;
-        for (int y = c1_y1; y <= c1_y2; ++y) {
-            Uint32 *row = (Uint32 *)(binPix2 + y * binPitch3);
-            for (int x = c1_x1; x <= c1_x2; ++x) {
-                if (row[x] == blackPixel) c1_black++;
+        if (c1_x2 >= c1_x1 && c1_y2 >= c1_y1)
+        {
+            SDL_LockSurface(bin);
+            bp = (Uint8 *)bin->pixels;
+            pitch = bin->pitch;
+            for (int y = c1_y1; y <= c1_y2; ++y)
+            {
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = c1_x1; x <= c1_x2; ++x) if (row[x] == black) c1_black++;
             }
+            SDL_UnlockSurface(bin);
         }
-        for (int y = c2_y1; y <= c2_y2; ++y) {
-            Uint32 *row = (Uint32 *)(binPix2 + y * binPitch3);
-            for (int x = c2_x1; x <= c2_x2; ++x) {
-                if (row[x] == blackPixel) c2_black++;
+        if (c2_x2 >= c2_x1 && c2_y2 >= c2_y1)
+        {
+            SDL_LockSurface(bin);
+            bp = (Uint8 *)bin->pixels;
+            pitch = bin->pitch;
+            for (int y = c2_y1; y <= c2_y2; ++y)
+            {
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = c2_x1; x <= c2_x2; ++x) if (row[x] == black) c2_black++;
             }
+            SDL_UnlockSurface(bin);
         }
-        SDL_UnlockSurface(binSurf);
-        int gridCluster1 = (c1_black >= c2_black);
-        if (gridCluster1) {
-            grid_x = c1_x1;
-            grid_y = c1_y1;
-            grid_w = c1_x2 - c1_x1 + 1;
-            grid_h = c1_y2 - c1_y1 + 1;
-            list_x = c2_x1;
-            list_y = c2_y1;
-            list_w = c2_x2 - c2_x1 + 1;
-            list_h = c2_y2 - c2_y1 + 1;
-        } else {
-            grid_x = c2_x1;
-            grid_y = c2_y1;
-            grid_w = c2_x2 - c2_x1 + 1;
-            grid_h = c2_y2 - c2_y1 + 1;
-            list_x = c1_x1;
-            list_y = c1_y1;
-            list_w = c1_x2 - c1_x1 + 1;
-            list_h = c1_y2 - c1_y1 + 1;
+
+        bool c1grid = (c1_black >= c2_black);
+        if (c1grid)
+        {
+            grid_x = c1_x1; grid_y = c1_y1; grid_w = c1_x2 - c1_x1 + 1; grid_h = c1_y2 - c1_y1 + 1;
+            list_x = c2_x1; list_y = c2_y1; list_w = c2_x2 - c2_x1 + 1; list_h = c2_y2 - c2_y1 + 1;
+        }
+        else
+        {
+            grid_x = c2_x1; grid_y = c2_y1; grid_w = c2_x2 - c2_x1 + 1; grid_h = c2_y2 - c2_y1 + 1;
+            list_x = c1_x1; list_y = c1_y1; list_w = c1_x2 - c1_x1 + 1; list_h = c1_y2 - c1_y1 + 1;
         }
     }
 
-    SDL_LockSurface(surf);
-    Uint8 *outPixels = (Uint8 *)surf->pixels;
-    int outPitch = surf->pitch;
-    Uint32 redColor = SDL_MapRGB(surf->format, 255, 0, 0);
-    Uint32 blueColor = SDL_MapRGB(surf->format, 0, 0, 255);
-    // Draw grid box in red
-    if (grid_w > 0 && grid_h > 0) {
-        if (grid_y >= 0 && grid_y < height) {
-            Uint32 *topRow = (Uint32 *)(outPixels + grid_y * outPitch);
-            for (int x = grid_x; x < grid_x + grid_w && x < width; ++x) {
-                topRow[x] = redColor;
+    // Determine grid rows/cols by projection inside grid ROI
+    if (grid_w > 0 && grid_h > 0)
+    {
+        int *gcol = (int *)calloc(grid_w, sizeof(int));
+        int *grow = (int *)calloc(grid_h, sizeof(int));
+        if (gcol && grow)
+        {
+            SDL_LockSurface(bin);
+            bp = (Uint8 *)bin->pixels;
+            pitch = bin->pitch;
+            for (int y = grid_y; y < grid_y + grid_h; ++y)
+            {
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = grid_x; x < grid_x + grid_w; ++x)
+                {
+                    if (row[x] == black) { gcol[x - grid_x]++; grow[y - grid_y]++; }
+                }
             }
-        }
-        int by = grid_y + grid_h - 1;
-        if (by >= 0 && by < height) {
-            Uint32 *bottomRow = (Uint32 *)(outPixels + by * outPitch);
-            for (int x = grid_x; x < grid_x + grid_w && x < width; ++x) {
-                bottomRow[x] = redColor;
-            }
-        }
-        if (grid_x >= 0 && grid_x < width) {
-            for (int y = grid_y; y < grid_y + grid_h && y < height; ++y) {
-                Uint32 *row = (Uint32 *)(outPixels + y * outPitch);
-                row[grid_x] = redColor;
-            }
-        }
-        int rx = grid_x + grid_w - 1;
-        if (rx >= 0 && rx < width) {
-            for (int y = grid_y; y < grid_y + grid_h && y < height; ++y) {
-                Uint32 *row = (Uint32 *)(outPixels + y * outPitch);
-                row[rx] = redColor;
-            }
-        }
-    }
-    // Draw word list box in blue
-    if (list_w > 0 && list_h > 0) {
-        if (list_y >= 0 && list_y < height) {
-            Uint32 *topRow = (Uint32 *)(outPixels + list_y * outPitch);
-            for (int x = list_x; x < list_x + list_w && x < width; ++x) {
-                topRow[x] = blueColor;
-            }
-        }
-        int by = list_y + list_h - 1;
-        if (by >= 0 && by < height) {
-            Uint32 *bottomRow = (Uint32 *)(outPixels + by * outPitch);
-            for (int x = list_x; x < list_x + list_w && x < width; ++x) {
-                bottomRow[x] = blueColor;
-            }
-        }
-        if (list_x >= 0 && list_x < width) {
-            for (int y = list_y; y < list_y + list_h && y < height; ++y) {
-                Uint32 *row = (Uint32 *)(outPixels + y * outPitch);
-                row[list_x] = blueColor;
-            }
-        }
-        int rx = list_x + list_w - 1;
-        if (rx >= 0 && rx < width) {
-            for (int y = list_y; y < list_y + list_h && y < height; ++y) {
-                Uint32 *row = (Uint32 *)(outPixels + y * outPitch);
-                row[rx] = blueColor;
-            }
-        }
-    }
-    SDL_UnlockSurface(surf);
+            SDL_UnlockSurface(bin);
 
-    if (SDL_SaveBMP(binSurf, "stage_bin.bmp") != 0) {
-        fprintf(stderr, "Failed to save stage_bin.bmp: %s\n", SDL_GetError());
+            int vlines = 0;
+            bool inCluster = false;
+            for (int j = 0; j < grid_w; ++j)
+            {
+                double fill = (double)gcol[j] / (double)grid_h;
+                if (fill > 0.9)
+                {
+                    if (!inCluster) { vlines++; inCluster = true; }
+                }
+                else inCluster = false;
+            }
+
+            int hlines = 0;
+            inCluster = false;
+            for (int i = 0; i < grid_h; ++i)
+            {
+                double fill = (double)grow[i] / (double)grid_w;
+                if (fill > 0.9)
+                {
+                    if (!inCluster) { hlines++; inCluster = true; }
+                }
+                else inCluster = false;
+            }
+
+            if (vlines >= 2 && hlines >= 2)
+            {
+                grid_cols = vlines - 1;
+                grid_rows = hlines - 1;
+            }
+            else
+            {
+                grid_cols = 0;
+                inCluster = false;
+                for (int j = 0; j < grid_w; ++j)
+                {
+                    if (gcol[j] > 0)
+                    {
+                        if (!inCluster) { grid_cols++; inCluster = true; }
+                    }
+                    else inCluster = false;
+                }
+                grid_rows = 0;
+                inCluster = false;
+                for (int i = 0; i < grid_h; ++i)
+                {
+                    if (grow[i] > 0)
+                    {
+                        if (!inCluster) { grid_rows++; inCluster = true; }
+                    }
+                    else inCluster = false;
+                }
+            }
+        }
+        free(gcol);
+        free(grow);
     }
-    if (SDL_SaveBMP(surf, "stage_layout.bmp") != 0) {
-        fprintf(stderr, "Failed to save stage_layout.bmp: %s\n", SDL_GetError());
+
+    // Count words in list region by counting line clusters, detect 1 or 2 columns
+    if (list_w > 0 && list_h > 0)
+    {
+        SDL_LockSurface(bin);
+        bp = (Uint8 *)bin->pixels;
+        pitch = bin->pitch;
+
+        int best_gap_len = 0, gap_s = -1, gap_e = -1;
+        int cur_len = 0, cur_s = -1;
+        for (int x = list_x; x < list_x + list_w; ++x)
+        {
+            bool colHasBlack = false;
+            for (int y = list_y; y < list_y + list_h; ++y)
+            {
+                Uint32 px = *(Uint32 *)(bp + y * pitch + x * 4);
+                if (px == black) { colHasBlack = true; break; }
+            }
+            if (!colHasBlack)
+            {
+                if (cur_len == 0) cur_s = x;
+                cur_len++;
+            }
+            else
+            {
+                if (cur_len > best_gap_len) { best_gap_len = cur_len; gap_s = cur_s; gap_e = x - 1; }
+                cur_len = 0;
+            }
+        }
+        if (cur_len > best_gap_len) { best_gap_len = cur_len; gap_s = cur_s; gap_e = list_x + list_w - 1; }
+
+        int min_gap = list_w / 30;
+        if (min_gap < 5) min_gap = 5;
+        int columns = 1;
+        if (best_gap_len >= min_gap && gap_s > list_x && gap_e < list_x + list_w - 1) columns = 2;
+
+        // helper to count lines
+        int count_lines = 0;
+        bool inLine = false;
+        for (int y = list_y; y < list_y + list_h; ++y)
+        {
+            bool rowHasBlack = false;
+            Uint32 *row = (Uint32 *)(bp + y * pitch);
+            for (int x = list_x; x < list_x + list_w; ++x)
+            {
+                if (row[x] == black) { rowHasBlack = true; break; }
+            }
+            if (rowHasBlack)
+            {
+                if (!inLine) { count_lines++; inLine = true; }
+            }
+            else inLine = false;
+        }
+        if (columns == 1) word_count = count_lines;
+        else
+        {
+            // split left/right and count
+            int left_x = list_x, left_w = gap_s - list_x;
+            int right_x = gap_e + 1, right_w = list_x + list_w - right_x;
+            int left_count = 0, right_count = 0;
+            inLine = false;
+            for (int y = list_y; y < list_y + list_h; ++y)
+            {
+                bool leftHas = false;
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = left_x; x < left_x + left_w; ++x) if (row[x] == black) { leftHas = true; break; }
+                if (leftHas)
+                {
+                    if (!inLine) { left_count++; inLine = true; }
+                }
+                else inLine = false;
+            }
+            inLine = false;
+            for (int y = list_y; y < list_y + list_h; ++y)
+            {
+                bool rightHas = false;
+                Uint32 *row = (Uint32 *)(bp + y * pitch);
+                for (int x = right_x; x < right_x + right_w; ++x) if (row[x] == black) { rightHas = true; break; }
+                if (rightHas)
+                {
+                    if (!inLine) { right_count++; inLine = true; }
+                }
+                else inLine = false;
+            }
+            word_count = left_count + right_count;
+        }
+
+        SDL_UnlockSurface(bin);
     }
-    FILE *fg = fopen("grid_roi.txt", "w");
-    if (fg) {
-        fprintf(fg, "%d %d %d %d", grid_x, grid_y, grid_w, grid_h);
+
+    // prepare output dir and write files
+    make_dir_if_needed("output");
+    make_dir_if_needed("output/grid");
+    make_dir_if_needed("output/words");
+
+    FILE *fg = fopen("output/grid_roi.txt", "w");
+    if (fg)
+    {
+        fprintf(fg, "%d %d %d %d %d %d\n", grid_x, grid_y, grid_w, grid_h, grid_cols, grid_rows);
         fclose(fg);
-    } else {
-        fprintf(stderr, "Failed to write grid_roi.txt\n");
     }
-    FILE *fw = fopen("wordlist_roi.txt", "w");
-    if (fw) {
-        fprintf(fw, "%d %d %d %d", list_x, list_y, list_w, list_h);
-        fclose(fw);
-    } else {
-        fprintf(stderr, "Failed to write wordlist_roi.txt\n");
-    }
+    else fprintf(stderr, "Failed to write output/grid_roi.txt\n");
 
-    // Clean up
+    FILE *fw = fopen("output/wordlist_roi.txt", "w");
+    if (fw)
+    {
+        fprintf(fw, "%d %d %d %d %d\n", list_x, list_y, list_w, list_h, word_count);
+        fclose(fw);
+    }
+    else fprintf(stderr, "Failed to write output/wordlist_roi.txt\n");
+
+    // save debug images
+    if (SDL_SaveBMP(bin, "output/stage_bin.bmp") != 0) fprintf(stderr, "save bin: %s\n", SDL_GetError());
+    Uint32 red = SDL_MapRGB(orig->format, 255, 0, 0);
+    Uint32 blue = SDL_MapRGB(orig->format, 0, 0, 255);
+    draw_rect(orig, grid_x, grid_y, grid_w, grid_h, red);
+    if (list_w > 0 && list_h > 0) draw_rect(orig, list_x, list_y, list_w, list_h, blue);
+    if (SDL_SaveBMP(orig, "output/stage_layout.bmp") != 0) fprintf(stderr, "save layout: %s\n", SDL_GetError());
+
     free(col_sum);
     free(row_sum);
-    SDL_FreeSurface(surf);
-    SDL_FreeSurface(binSurf);
+    SDL_FreeSurface(bin);
+    SDL_FreeSurface(orig);
     IMG_Quit();
     SDL_Quit();
     return 0;
