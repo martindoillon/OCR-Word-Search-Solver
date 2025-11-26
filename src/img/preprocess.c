@@ -1,79 +1,172 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <MagickWand/MagickWand.h>
 #include <math.h>
+#include <err.h>
 
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
+//-----------------------------------------------
+// INTERNAL HELPERS (not visible outside module)
+//-----------------------------------------------
+static SDL_Surface* grayscale(SDL_Surface* surface);
+static SDL_Surface* linear_contrast(SDL_Surface* surface);
+static SDL_Surface* rotate_surface(SDL_Surface* surface, double angle_degrees);
 
-// Function to rotate image manually
-void rotate_image(MagickWand *wand, double angle) {
-    PixelWand *bg = NewPixelWand();
-    PixelSetColor(bg, "white"); // Fill background with white after rotation
-    MagickRotateImage(wand, bg, angle);
-    bg = DestroyPixelWand(bg);
-}
-
-// Function to automatically detect skew angle (simple estimation using Hough transform approximation)
-double detect_skew_angle(MagickWand *wand) {
-    // MagickWand does not provide direct skew detection,
-    // so a simple approach is to compute orientation via deskew
-    // using MagickDeskewImage, which tries to find the skew automatically
-    MagickBooleanType success = MagickDeskewImage(wand, 0.40 * QuantumRange); // threshold 40%
-    if (success == MagickFalse) {
-        return 0.0;
-    }
-    // Deskew already applied; return 0 as angle (MagickDeskewImage rotates internally)
-    return 0.0;
-}
-
-int main(int argc, char **argv) 
+//-----------------------------------------------
+// PUBLIC API: preprocess() — to be used by pipeline
+//-----------------------------------------------
+SDL_Surface* preprocess(SDL_Surface* input, double rotation_angle)
 {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <input_image> [manual_angle]\n", argv[0]);
-        return 1;
+    if (!input)
+        return NULL;
+
+    SDL_Surface* gray = grayscale(input);
+    if (!gray)
+        return NULL;
+
+    SDL_Surface* contrast = linear_contrast(gray);
+    SDL_FreeSurface(gray);
+    if (!contrast)
+        return NULL;
+
+    SDL_Surface* rotated = rotate_surface(contrast, rotation_angle);
+    SDL_FreeSurface(contrast);
+    if (!rotated)
+        return NULL;
+
+    return rotated;   // Pipeline receives the final surface
+}
+
+//-----------------------------------------------
+// Grayscale
+//-----------------------------------------------
+static SDL_Surface* grayscale(SDL_Surface* surface)
+{
+    SDL_Surface* gray = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB888, 0);
+    if (!gray) return NULL;
+
+    if (SDL_MUSTLOCK(gray)) SDL_LockSurface(gray);
+
+    Uint32* pixels = (Uint32*)gray->pixels;
+    int w = gray->w;
+    int h = gray->h;
+    SDL_PixelFormat* fmt = gray->format;
+
+    for (int y = 0; y < h; y++)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            Uint32 pixel = pixels[y * w + x];
+            Uint8 r, g, b;
+            SDL_GetRGB(pixel, fmt, &r, &g, &b);
+            Uint8 gval = (Uint8)(0.299*r + 0.587*g + 0.114*b);
+            pixels[y * w + x] = SDL_MapRGB(fmt, gval, gval, gval);
+        }
     }
 
-    const char *input_path = argv[1];
-    double manual_angle = 0.0;
-    if (argc >= 3) {
-        manual_angle = atof(argv[2]); // Optional: user can provide manual rotation angle
+    if (SDL_MUSTLOCK(gray)) SDL_UnlockSurface(gray);
+    return gray;
+}
+
+//-----------------------------------------------
+// Linear contrast
+//-----------------------------------------------
+static SDL_Surface* linear_contrast(SDL_Surface* surface)
+{
+    SDL_Surface* result = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB888, 0);
+    if (!result) return NULL;
+
+    if (SDL_MUSTLOCK(result)) SDL_LockSurface(result);
+
+    Uint32* pixels = (Uint32*)result->pixels;
+    int w = result->w;
+    int h = result->h;
+    SDL_PixelFormat* fmt = result->format;
+
+    Uint8 Imin = 255, Imax = 0;
+
+    // Find min & max
+    for (int y = 0; y < h; y++)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[y * w + x], fmt, &r, &g, &b);
+            if (r < Imin) Imin = r;
+            if (r > Imax) Imax = r;
+        }
     }
 
-    MagickWandGenesis();
-    MagickWand *wand = NewMagickWand();
-
-    if (MagickReadImage(wand, input_path) == MagickFalse) {
-        fprintf(stderr, "Error reading image '%s'\n", input_path);
-        DestroyMagickWand(wand);
-        MagickWandTerminus();
-        return 1;
+    if (Imax == Imin)
+    {
+        if (SDL_MUSTLOCK(result)) SDL_UnlockSurface(result);
+        return result;
     }
 
-    // Manual deskew if user provided an angle
-    if (fabs(manual_angle) > 0.01) {
-        rotate_image(wand, manual_angle);
+    // Stretch contrast
+    for (int y = 0; y < h; y++)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[y * w + x], fmt, &r, &g, &b);
+            Uint8 newV = (Uint8)(((float)(r - Imin) / (Imax - Imin)) * 255.0f);
+            pixels[y * w + x] = SDL_MapRGB(fmt, newV, newV, newV);
+        }
     }
 
-    // Automatic deskew
-    detect_skew_angle(wand);
+    if (SDL_MUSTLOCK(result)) SDL_UnlockSurface(result);
+    return result;
+}
 
-    // Noise reduction
-    MagickDespeckleImage(wand);
+//-----------------------------------------------
+// Rotation
+//-----------------------------------------------
+static SDL_Surface* rotate_surface(SDL_Surface* surface, double angle_degrees)
+{
+    int w = surface->w;
+    int h = surface->h;
+    double angle = angle_degrees * M_PI / 180.0;
 
-    // Contrast enhancement
-    MagickContrastStretchImage(wand, 0.1); // stretch contrast by 10% shadows/highlights
+    int new_w = (int)(fabs(w*cos(angle)) + fabs(h*sin(angle)));
+    int new_h = (int)(fabs(w*sin(angle)) + fabs(h*cos(angle)));
 
-    // Convert to grayscale
-    MagickSetImageType(wand, GrayscaleType);
+    SDL_Surface* rotated = SDL_CreateRGBSurfaceWithFormat(
+        0, new_w, new_h, 32, surface->format->format);
 
-    // Convert to black & white (thresholding)
-    MagickThresholdImage(wand, QuantumRange/2);
+    if (!rotated) return NULL;
 
-    // Save output
-    if (MagickWriteImage(wand, "output_bw.png") == MagickFalse) {
-        char *description = MagickGetException(wand, NULL);
-        fprintf(stderr, "Error: %s\n", description);
-        MagickRelinquishMemory(description);
-    } else {
-        printf("Image 'output_bw.png' created successfully!\n");
+    if (SDL_MUSTLOCK(surface)) SDL_LockSurface(surface);
+    if (SDL_MUSTLOCK(rotated)) SDL_LockSurface(rotated);
+
+    Uint32* src = (Uint32*)surface->pixels;
+    Uint32* dst = (Uint32*)rotated->pixels;
+
+    int cx = w / 2;
+    int cy = h / 2;
+    int ncx = new_w / 2;
+    int ncy = new_h / 2;
+
+    for (int y = 0; y < new_h; y++)
+    {
+        for (int x = 0; x < new_w; x++)
+        {
+            double rx = x - ncx;
+            double ry = y - ncy;
+
+            int sx = (int)( cos(angle) * rx + sin(angle) * ry) + cx;
+            int sy = (int)(-sin(angle) * rx + cos(angle) * ry) + cy;
+
+            if (sx >= 0 && sx < w && sy >= 0 && sy < h)
+                dst[y*new_w + x] = src[sy*w + sx];
+            else
+                dst[y*new_w + x] = SDL_MapRGB(surface->format, 0, 0, 0);
+        }
+    }
+
+    if (SDL_MUSTLOCK(surface)) SDL_UnlockSurface(surface);
+    if (SDL_MUSTLOCK(rotated)) SDL_UnlockSurface(rotated);
+
+    return rotated;
+}
 
