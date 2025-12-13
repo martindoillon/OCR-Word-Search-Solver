@@ -1,0 +1,35 @@
+Word Search Solver
+
+This is a C-based Word Search Solver with a simple SDL2 GUI. It allows you to load images of word search puzzles, preprocess them, segment the grid, recognize letters, and solve the puzzle automatically.
+
+
+
+Make sure you have SDL2, SDL2_image, and SDL2_ttf installed.
+Build the project by running:
+
+make
+
+Run the GUI:
+
+./gui
+
+
+
+The GUI provides 5 main buttons, designed to be used from left to right:
+Load Image – Select the puzzle image.
+Preprocess – Cleans the image for easier processing.
+Pre+Denoise – Cleans and removes noise (specks, artifacts). Use this if the image is noisy.
+Segment – Detects and extracts individual cells.
+Solve – Recognizes letters, reconstructs the puzzle, and highlights the solution.
+
+You should choose either Preprocess or Pre+Denoise, not both.
+
+
+All intermediate and final outputs are saved in the output directory in real time, so you can inspect each stage (loaded image, processed images, segmented cells, final solved puzzle).
+
+
+gui.c – Main GUI program
+preprocess.c – Image cleaning
+layout_detect.c, cell_finder.c – Grid layout and cell extraction
+predict_letters.c, emnist_mlp.c – Neural network letter recognition
+solver.c, rebuild_puzzle.c – Solve and highlight the puzzle
